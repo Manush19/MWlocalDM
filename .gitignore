@@ -160,11 +160,14 @@ cython_debug/
 #.idea/
 
 # Ignore Ultraroot
-Output/Ultra
+Output/Ultra/
 
 # Ignore Acessory folder (~600 MB)
 # Contains:
 #   - RotCurvs: folder containing SPARC galname_rotmod.dat files
 #   - mw1.dat and mw2.dat, MW RC data files
 #   - sparc_dict.json the python dict containing the results of the analysis of reliabiltiy paper study on the SPARC rotation curves
-Acessory
+Accessory/
+
+# Ignore the python environment folder 
+prjenv/
