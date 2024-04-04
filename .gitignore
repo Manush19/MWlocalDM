@@ -171,3 +171,7 @@ Accessory/
 
 # Ignore the python environment folder 
 prjenv/
+
+# Ignore unwanted output data
+Output/chains_lcdm_reg_DDGB_8kpc.pkl
+Output/MW_vdf_chain.pkl

@@ -28,3 +28,13 @@ class Constants:
 	m200_c200_scatter = 0.11 #dex
 	GeV = 1.7827 * 1e-27 # 1GeV c^2 = this much kg
 	GeV_by_cc = 1.7827 * (3.08**3) * 1e6/ 1.989 # Msun kpc^-3
+
+class MW_params:
+    """
+    Constants for MW mass models, so that it can be used consistently everywhere
+    """
+    Rsun = 8.0 # kpc
+    Vsun = 200.0 # km/s
+    Vert = Vsun*(1.05+0.07) # km/s
+    Rhosun_cc = 0 # GeV/cm^3
+    Rhosun = 0 # Msun/kpc^3
