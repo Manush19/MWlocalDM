@@ -84,9 +84,6 @@ class Nuclear:
         self.vcirc= vcirc
         self.vert = self.vcirc*(1.05+0.07)
         self.ρ0 = rhosun
-        # if 'ρ0' in kwargs.keys():
-        #     self.ρ0 = kwargs.get('ρ0')
-        # else: self.ρ0 = 0.3 #GeV/cm^3
         
         self.unit_cross_section = 1e27/(0.389) #GeV^-2
         self.unit_density = (0.197)**3 * 1e-39 #GeV^4
@@ -102,16 +99,13 @@ class Nuclear:
         self.mN = 0.939 #GeV
         self.yr = 365*24 #days
 
-        self.E = np.logspace(-5,1.2,1000)
+        self.ω = kwargs.get('ω') if 'ω' in kwargs.keys() else 1
+        self.ω = 1e3*365 * self.ω
+        self.Ethr = kwawrgs.get('Ethr') if 'Ethr' in kwargs.keys() else 0.1
+        self.E = kwargs.get('E') if 'E' in kwargs.keys() else np.logspace(np.log10(self.Ethr), 2, 1000)
+        
         self.vmin = np.logspace(-5,3,1000)
-        eta = self.velInt(self.vmin)
-        self.eta = sp.interpolate.interp1d(self.vmin, eta, kind = 'cubic',
-                                           fill_value = 'extrapolate', 
-                                           bounds_error = False)
-        fhelm = self.fHelm(self.E)
-        self.fhelm = sp.interpolate.interp1d(self.E, fhelm, kind = 'cubic',
-                                             fill_value = 'extrapolate',
-                                             bounds_error = False)
+
     def fHelm(self,E):
         # s = 1
         # R_ = 1.2*self.A**(1/3)
@@ -156,15 +150,7 @@ class Nuclear:
     def preFactor(self,mdm,σp,E):
         σp = σp*self.unit_cross_section
         μN = mdm*self.mN/(mdm+self.mN)
-        return σp*self.ρ0*(self.A**2)*(self.fhelm(E)**2)/(mdm*2*(μN**2))
-
-    # def diffRate(self, mdm, σp, E):
-    #     self.x, self.y = [],[]
-    #     μT = mdm*self.mT/(mdm+self.mT)
-    #     rate = []
-    #     vmin = np.sqrt(self.mT*E*1e-6/(2*μT**2)) * self.unit_vmin
-    #     eta = self.eta(vmin)
-    #     return self.preFactor(mdm, σp, E) * eta * self.unit_prefactor * self.unit_η
+        return σp*self.ρ0*(self.A**2)*(self.fHelm(E)**2)/(mdm*2*(μN**2))
         
     def diffRate(self,mdm,σp,E): # Formarly Rate
         self.x,self.y = [],[]
@@ -178,18 +164,16 @@ class Nuclear:
             rate.append(self.preFactor(mdm,σp,E_) * η[0])
         return np.array(rate) * self.unit_prefactor * self.unit_η
     
-    def totN(self,mdm,σp,E,ω = 1e3*365,Emin = 0):
+    def totN(self, mdm, σp, **kwargs):
         # ω is in kg days (default 1 t yr)
-        # Emin is the threshold energy (default = 0 KeV)
-        E = E[E > Emin]
+        # Ethr is the threshold energy (default = 0.1 KeV)
+        Ethr = kwargs.get('Ethr') if 'Ethr' in kwargs.keys() else self.Ethr
+        E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
+        E = E[E > Ethr]
+        ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
+        ω = 1e3*365 * ω
+
         return ω*np.trapz(self.diffRate(mdm,σp,E),E)
-
-    # def Ntot(self,mdm,σp,E,ω = 1e3*365,Emin = 0):
-    #     # ω is in kg days (default 1 t yr)
-    #     # Emin is the threshold energy (default = 0 KeV)
-    #     E = E[E > Emin]
-    #     return ω*np.trapz(self.Rate(mdm,σp,E),E)
-
 
 
 
