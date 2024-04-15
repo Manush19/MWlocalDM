@@ -1,9 +1,10 @@
 import numpy as np
 import scipy as sp
 from scipy.signal import medfilt
+from scipy.stats import poisson
 from project.constants import MW_params as pm
 
-norm = lambda vdf,v: vdf/np.trapz(vdf, v)
+norm = lambda f, x: f/np.trapz(f, x) if not np.all(f == 0) else f
 
 def vdf_fn(v_,v,vdf): 
     vdffn = sp.interpolate.interp1d(v,vdf,
@@ -71,6 +72,14 @@ def get_eta(vmin, vE, vdfE, vesc, vcirc):
     return np.array(eta)
 
 
+
+
+
+    
+    
+    
+
+
 Atomic_mass = {'Na': 23.0, 'I': 127.0, 'W': 184.0, 'Ca': 40.0, 'O': 16.0, 'Al': 27.0, 'Xe': 132.0, 'Ge': 74.0}
 
 class Nuclear:
@@ -100,9 +109,10 @@ class Nuclear:
         self.yr = 365*24 #days
 
         self.ω = kwargs.get('ω') if 'ω' in kwargs.keys() else 1
-        self.ω = 1e3*365 * self.ω
-        self.Ethr = kwawrgs.get('Ethr') if 'Ethr' in kwargs.keys() else 0.1
-        self.E = kwargs.get('E') if 'E' in kwargs.keys() else np.logspace(np.log10(self.Ethr), 2, 1000)
+        self.exposure = 1e3*365 * self.ω
+        self.Ethr = kwargs.get('Ethr') if 'Ethr' in kwargs.keys() else 0.1
+        self.Eroi = kwargs.get('Eroi') if 'Eroi' in kwargs.keys() else 10.0
+        self.E = kwargs.get('E') if 'E' in kwargs.keys() else np.linspace(self.Ethr, self.Eroi, 1000)
         
         self.vmin = np.logspace(-5,3,1000)
 
@@ -152,32 +162,99 @@ class Nuclear:
         μN = mdm*self.mN/(mdm+self.mN)
         return σp*self.ρ0*(self.A**2)*(self.fHelm(E)**2)/(mdm*2*(μN**2))
         
-    def diffRate(self,mdm,σp,E): # Formarly Rate
-        self.x,self.y = [],[]
+    def diffRate(self,mdm,σp, **kwargs): # Formarly Rate
+        E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
+
+        if mdm == 0:
+            return np.ones(np.shape(E))*1e-15
+        
         μT = mdm*self.mT/(mdm+self.mT)
         rate = []
+        # print (E)
         for E_ in E:
             vmin = np.sqrt(self.mT*E_*1e-6/(2*μT**2)) * self.unit_vmin
             η = self.velInt([vmin])
-            self.x.append(vmin)
-            self.y.append(η[0])
-            rate.append(self.preFactor(mdm,σp,E_) * η[0])
+
+            rate.append(self.preFactor(mdm, σp, E_) * η[0])
         return np.array(rate) * self.unit_prefactor * self.unit_η
+
+    def diffBg(self, bl = 0., **kwargs):
+        E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
+        bl = 1e-32 if bl == 0 else bl
+        return np.ones(np.shape(E)) * bl
+
+    def diffTot(self, mdm, σp, bl = 0., **kwargs):
+        return self.diffRate(mdm, σp, **kwargs) + self.diffBg(bl, **kwargs)
     
-    def totN(self, mdm, σp, **kwargs):
+    def totN(self, mdm, σp, bl = 0., **kwargs):
         # ω is in kg days (default 1 t yr)
         # Ethr is the threshold energy (default = 0.1 KeV)
         Ethr = kwargs.get('Ethr') if 'Ethr' in kwargs.keys() else self.Ethr
         E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
-        E = E[E > Ethr]
+        E = E[E >= Ethr] # Making sure to not go below Ethr
         ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
-        ω = 1e3*365 * ω
-
-        return ω*np.trapz(self.diffRate(mdm,σp,E),E)
-
+        exposure = 1e3*365 * ω
+        return exposure*np.trapz(self.diffTot(mdm, σp, bl, E = E), E)
 
 
+    def mocksample(self, mdm, σp, bl = 0., Ntot = 'mean', seed = 2344, **kwargs):
+        """
+        Do initialize E, Ethr, omega in the namespace.
+        """
+        E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
+        ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
+        exposure = 1e3*365 * ω
+        
+        pdfsg = norm(self.diffRate(mdm, σp, **kwargs), E)
+        pdfsg = np.zeros(E.shape) if mdm == 0 else pdfsg
+        pdfbg = norm(self.diffBg(bl, **kwargs), E)
+        pdf = pdfsg + pdfbg
+        pdf = pdf/np.trapz(pdf, E)
 
+        cdf = np.cumsum(pdf)
+        cdf = cdf/cdf[-1]
+
+        if Ntot == 'mean':
+            N = self.totN(mdm, σp, bl, **kwargs)
+        elif Ntot == 'poisson':
+            N = np.random.poisson(Ntot, 1)
+
+        if seed:
+            np.random.seed(seed)
+
+        sample = []
+        for u in np.random.uniform(0, 1, size = int(np.floor(N))):
+            index = (np.abs(cdf - u).argmin())
+            sample.append(E[index])
+        return (np.array(sample), np.vstack((E, cdf, pdf, pdfsg, pdfbg)).T)
+
+    def binTot(self, bins, mdm, σp, bl, accuracy = 5, **kwargs):
+        Nbins = len(bins) - 1
+        bint = np.zeros(Nbins)
+        Eint = np.zeros(Nbins)
+        for i in range(Nbins):
+            bint[i] = self.totN(mdm, σp, bl, E = np.linspace(bins[i], bins[i + 1], accuracy), **kwargs)
+            Eint[i] = 0.5*(bins[i] + bins[i + 1])
+        return (Eint, bint)
+        
+        
+        
+        
+
+
+
+def binSamp(samp, Nbins, accuracy):
+    binned = np.histogram(samp, Nbins)
+    E_array = []
+    for i in range(Nbins):
+        E_array.extend(np.linspace(binned[1][i], binned[1][i+1], accuracy))
+    binnedE = np.array(E_array)
+    Ntot = np.size(samp)
+    return {'binnedsample': binned,
+            'binnedE': binnedE,
+            'Ntot': Ntot,
+            'Nbins': Nbins,
+            'accuracy': accuracy}
 
 
 
