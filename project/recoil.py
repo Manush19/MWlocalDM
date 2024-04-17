@@ -5,8 +5,9 @@ from scipy.stats import poisson
 from project.constants import MW_params as pm
 
 norm = lambda f, x: f/np.trapz(f, x) if not np.all(f == 0) else f
+p50 = lambda x: np.percentile(x, 50)
 
-def vdf_fn(v_,v,vdf): 
+def vdf_fn(v_, v, vdf): 
     vdffn = sp.interpolate.interp1d(v,vdf,
                                     kind = 'linear',
                                     bounds_error = False,
@@ -111,8 +112,8 @@ class Nuclear:
         self.ω = kwargs.get('ω') if 'ω' in kwargs.keys() else 1
         self.exposure = 1e3*365 * self.ω
         self.Ethr = kwargs.get('Ethr') if 'Ethr' in kwargs.keys() else 0.1
-        self.Eroi = kwargs.get('Eroi') if 'Eroi' in kwargs.keys() else 10.0
-        self.E = kwargs.get('E') if 'E' in kwargs.keys() else np.linspace(self.Ethr, self.Eroi, 1000)
+        self.Eroi = kwargs.get('Eroi') if 'Eroi' in kwargs.keys() else 5.0
+        self.E = kwargs.get('E') if 'E' in kwargs.keys() else np.linspace(self.Ethr, self.Eroi, 300)
         
         self.vmin = np.logspace(-5,3,1000)
 
@@ -162,7 +163,7 @@ class Nuclear:
         μN = mdm*self.mN/(mdm+self.mN)
         return σp*self.ρ0*(self.A**2)*(self.fHelm(E)**2)/(mdm*2*(μN**2))
         
-    def diffRate(self,mdm,σp, **kwargs): # Formarly Rate
+    def diffSg(self,mdm,σp, **kwargs): # Formarly Rate
         E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
 
         if mdm == 0:
@@ -170,7 +171,6 @@ class Nuclear:
         
         μT = mdm*self.mT/(mdm+self.mT)
         rate = []
-        # print (E)
         for E_ in E:
             vmin = np.sqrt(self.mT*E_*1e-6/(2*μT**2)) * self.unit_vmin
             η = self.velInt([vmin])
@@ -180,81 +180,166 @@ class Nuclear:
 
     def diffBg(self, bl = 0., **kwargs):
         E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
-        bl = 1e-32 if bl == 0 else bl
+        bl = 1e-32 if bl <= 0 else bl
         return np.ones(np.shape(E)) * bl
 
     def diffTot(self, mdm, σp, bl = 0., **kwargs):
-        return self.diffRate(mdm, σp, **kwargs) + self.diffBg(bl, **kwargs)
-    
-    def totN(self, mdm, σp, bl = 0., **kwargs):
-        # ω is in kg days (default 1 t yr)
-        # Ethr is the threshold energy (default = 0.1 KeV)
-        Ethr = kwargs.get('Ethr') if 'Ethr' in kwargs.keys() else self.Ethr
+        return self.diffSg(mdm, σp, **kwargs) + self.diffBg(bl, **kwargs)
+
+    def totNsg(self, mdm, σp, **kwargs):
         E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
-        E = E[E >= Ethr] # Making sure to not go below Ethr
         ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
-        exposure = 1e3*365 * ω
-        return exposure*np.trapz(self.diffTot(mdm, σp, bl, E = E), E)
+        Ethr = kwargs.get('Ethr') if 'Ethr' in kwargs.keys() else self.Ethr
+        E = E[E >= Ethr]
+        exposure = 1e3*365*ω
+        return exposure*np.trapz(self.diffSg(mdm, σp, E = E), E)
+
+    def totNbg(self, bl, **kwargs):
+        E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
+        ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
+        Ethr = kwargs.get('Ethr') if 'Ethr' in kwargs.keys() else self.Ethr
+        E = E[E >= Ethr]
+        exposure = 1e3*365*ω
+        # return exposure*np.trapz(self.diffBg(bl, E = E), E)
+        return exposure*bl*(E[-1] - E[0])
+    
+    def totNtot(self, mdm, σp, bl=0., **kwargs):
+        return self.totNsg(mdm, σp, **kwargs) + self.totNbg(bl, **kwargs)
+
+    def totNgrid(self, Mgrid, Sgrid, blgrid, σ0=1e-46, **kwargs):
+        Mdm = Mgrid[0,:]
+        Sdm = Sgrid[:,0]
+
+        Nsg = np.zeros(Mgrid.shape)
+        Nbg = np.zeros(Mgrid.shape)
+
+        σ0_by_N0 = self.σpMdmNsg(Mdm, N=1, σ0=σ0, **kwargs)
+        for i in range(Mgrid.shape[0]):
+            Nsg[i,:] = Sdm[i] / σ0_by_N0
+                
+        for i in range(blgrid.shape[0]):
+            for j in range(blgrid.shape[1]):
+                Nbg[i,j] = self.totNbg(blgrid[i,j], **kwargs)
+                
+        return Nsg + Nbg
+
+    def σpMdmNsg(self, Mdm, N=1, σ0=1e-46, **kwargs):
+        isfloat = True if isinstance(Mdm, float) else False
+        Mdm = np.array([Mdm]) if isfloat else Mdm
+        N0 = np.zeros(Mdm.shape)
+        for i, mdm in enumerate(Mdm):
+            N0[i] = self.totNsg(mdm, σ0, **kwargs)
+        N0[N0 <= 0] = 1e-32
+        Sdm = σ0/N0
+        return Sdm
+
+    def binTot(self, mdm, σp, bl, bin_edges, accuracy=10):
+        # No kwargs, Ethr, ω, Eroi etc, should be specified in the namespace
+        Nbins = len(bin_edges) - 1
+        bint = np.zeros(Nbins)
+        Eint = np.zeros(Nbins)
+        for i in range(Nbins):
+            E = np.linspace(bin_edges[i], bin_edges[i + 1], accuracy)
+            bint[i] = self.totNtot(mdm, σp, bl, E = E)
+            Eint[i] = 0.5*(bin_edges[i] + bin_edges[i + 1])
+        return {'Neachbin': bint,
+                'E_center': Eint,
+                'E_edges': bin_edges,
+                'accuracy': accuracy,
+                'mdm': mdm,
+                'σp': σp,
+                'bl': bl}
 
 
-    def mocksample(self, mdm, σp, bl = 0., Ntot = 'mean', seed = 2344, **kwargs):
+    def mocksample(self, mdm, σp, bl=0., Ntot='mean', seed=None, **kwargs):
         """
         Do initialize E, Ethr, omega in the namespace.
         """
-        E = kwargs.get('E') if 'E' in kwargs.keys() else self.E
-        ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
-        exposure = 1e3*365 * ω
+        E_array = np.linspace(self.Ethr, self.Eroi, 500)
         
-        pdfsg = norm(self.diffRate(mdm, σp, **kwargs), E)
-        pdfsg = np.zeros(E.shape) if mdm == 0 else pdfsg
-        pdfbg = norm(self.diffBg(bl, **kwargs), E)
+        pdfsg = self.diffSg(mdm, σp, E=E_array)
+        pdfbg = self.diffBg(bl, E=E_array)
+        pdfsg = np.zeros(E_array.shape) if mdm == 0 else pdfsg
+        pdfbg = np.zeros(E_array.shape) if bl == 0 else pdfbg
         pdf = pdfsg + pdfbg
-        pdf = pdf/np.trapz(pdf, E)
+        pdf = norm(pdf, E_array)
 
         cdf = np.cumsum(pdf)
         cdf = cdf/cdf[-1]
 
+        N = self.totNtot(mdm, σp, bl, E=E_array)
         if Ntot == 'mean':
-            N = self.totN(mdm, σp, bl, **kwargs)
+            N = N
         elif Ntot == 'poisson':
-            N = np.random.poisson(Ntot, 1)
+            N = np.random.poisson(N, 1)
 
         if seed:
             np.random.seed(seed)
 
-        sample = []
-        for u in np.random.uniform(0, 1, size = int(np.floor(N))):
+        Esample = []
+        for u in np.random.uniform(0, 1, size=int(np.floor(N))):
             index = (np.abs(cdf - u).argmin())
-            sample.append(E[index])
-        return (np.array(sample), np.vstack((E, cdf, pdf, pdfsg, pdfbg)).T)
-
-    def binTot(self, bins, mdm, σp, bl, accuracy = 5, **kwargs):
-        Nbins = len(bins) - 1
-        bint = np.zeros(Nbins)
-        Eint = np.zeros(Nbins)
-        for i in range(Nbins):
-            bint[i] = self.totN(mdm, σp, bl, E = np.linspace(bins[i], bins[i + 1], accuracy), **kwargs)
-            Eint[i] = 0.5*(bins[i] + bins[i + 1])
-        return (Eint, bint)
-        
-        
-        
-        
+            Esample.append(E_array[index])
+            
+        return {'Esample': np.array(Esample), 
+                'E_array': E_array,
+                'pdf': pdf,
+                'cdf': cdf,
+                'pdfsg': pdfsg,
+                'pdfbg': pdfbg,
+                'N_obs': int(np.floor(N))}
 
 
 
-def binSamp(samp, Nbins, accuracy):
-    binned = np.histogram(samp, Nbins)
+
+def binSamp(sample, bin_edges, accuracy):
+    Nbins = len(bin_edges) - 1
+    binned = np.histogram(sample, Nbins)
     E_array = []
+    E_center = []
     for i in range(Nbins):
         E_array.extend(np.linspace(binned[1][i], binned[1][i+1], accuracy))
+        E_center.append(0.5*(binned[1][i] + binned[1][i+1]))
     binnedE = np.array(E_array)
-    Ntot = np.size(samp)
+    Ntot = np.size(sample)
     return {'binnedsample': binned,
             'binnedE': binnedE,
             'Ntot': Ntot,
+            'bin_edges': bin_edges,
             'Nbins': Nbins,
+            'E_center': E_center,
             'accuracy': accuracy}
+
+class ProfileLikelihood:
+    def __init__(self, nr, sample_dict, **kwargs):
+        self.nr = nr
+        self.s = sample_dict
+        self.ni = bsamp['binnedsample'][0]
+        self.bins = bsamp['bins']
+        
+
+    def findllnorm(self, mdm = 5., σp = 1e-45, bl = 0.001):
+        self.mdm_sdm(mdm, σp)
+        self.llnorm = 1.0
+        norm = np.abs(self.nllike(bl))
+        print (norm)
+        return norm
+
+    def mdm_sdm(self, mdm, σp):
+        self.mdm = mdm
+        self.σp = σp
+
+    def nllike(self, bl):
+        E, λ = self.nr.binTot(self.bins, self.mdm, self.σp, bl)
+        ll = np.sum(self.ni * np.log(λ)) - np.sum(λ)
+        if np.isfinite(ll) == False:
+            ll = np.nan_to_num(ll, nan=-1e32, posinf=-1e32, neginf=-1e-32)
+        return -ll
+
+    # If Npred is >> Ntot or Npred << Ntot likelihood can give a very small number.
+
+        
+        
 
 
 
