@@ -2,7 +2,12 @@ import numpy as np
 import scipy as sp
 from scipy.signal import medfilt
 from scipy.stats import poisson
+from scipy.optimize import minimize
 from project.constants import MW_params as pm
+from iminuit import Minuit
+import project.quadrantHopping as quadH
+import warnings
+warnings.filterwarnings('ignore', message = 'invalid value encountered in log')
 
 norm = lambda f, x: f/np.trapz(f, x) if not np.all(f == 0) else f
 p50 = lambda x: np.percentile(x, 50)
@@ -242,6 +247,7 @@ class Nuclear:
             E = np.linspace(bin_edges[i], bin_edges[i + 1], accuracy)
             bint[i] = self.totNtot(mdm, σp, bl, E = E)
             Eint[i] = 0.5*(bin_edges[i] + bin_edges[i + 1])
+        bint[bint <= 0] = 1e-32
         return {'Neachbin': bint,
                 'E_center': Eint,
                 'E_edges': bin_edges,
@@ -250,11 +256,18 @@ class Nuclear:
                 'σp': σp,
                 'bl': bl}
 
-
-    def mocksample(self, mdm, σp, bl=0., Ntot='mean', seed=None, **kwargs):
+    def binTot_mdm_array(self, bin_edges, Mdm=np.linspace(1, 10, 1000), σ0=1e-46, accuracy = 10):
+        bintots = []
+        for mdm in Mdm:
+            bintots.append(self.binTot(mdm, σ0, bl=0, bin_edges=bin_edges))
+        self.bintots = bintots
+        self.mdm_array = Mdm
+        self.σ0 = σ0
+    
+    def mocksample(self, mdm, σp, bl, Nbins = 50, Ntot='mean', seed=None, **kwargs):
         """
         Do initialize E, Ethr, omega in the namespace.
-        """
+        """ 
         E_array = np.linspace(self.Ethr, self.Eroi, 500)
         
         pdfsg = self.diffSg(mdm, σp, E=E_array)
@@ -267,22 +280,26 @@ class Nuclear:
         cdf = np.cumsum(pdf)
         cdf = cdf/cdf[-1]
 
+        if seed:
+            np.random.seed(seed)
         N = self.totNtot(mdm, σp, bl, E=E_array)
+        
         if Ntot == 'mean':
             N = N
         elif Ntot == 'poisson':
             N = np.random.poisson(N, 1)
 
-        if seed:
-            np.random.seed(seed)
-
         Esample = []
         for u in np.random.uniform(0, 1, size=int(np.floor(N))):
             index = (np.abs(cdf - u).argmin())
             Esample.append(E_array[index])
+
+        hist = np.histogram(Esample, Nbins)
             
         return {'Esample': np.array(Esample), 
                 'E_array': E_array,
+                'binned_Esample': hist[0],
+                'E_bins': hist[1],
                 'pdf': pdf,
                 'cdf': cdf,
                 'pdfsg': pdfsg,
@@ -291,57 +308,83 @@ class Nuclear:
 
 
 
-
-def binSamp(sample, bin_edges, accuracy):
-    Nbins = len(bin_edges) - 1
-    binned = np.histogram(sample, Nbins)
-    E_array = []
-    E_center = []
-    for i in range(Nbins):
-        E_array.extend(np.linspace(binned[1][i], binned[1][i+1], accuracy))
-        E_center.append(0.5*(binned[1][i] + binned[1][i+1]))
-    binnedE = np.array(E_array)
-    Ntot = np.size(sample)
-    return {'binnedsample': binned,
-            'binnedE': binnedE,
-            'Ntot': Ntot,
-            'bin_edges': bin_edges,
-            'Nbins': Nbins,
-            'E_center': E_center,
-            'accuracy': accuracy}
-
 class ProfileLikelihood:
     def __init__(self, nr, sample_dict, **kwargs):
+        """
+        Attributes
+        ------------
+        nr: An instance of the Nuclear class (see above) representing
+            the experimental setup (Ethr, Eroi, ω) and the VDF 
+            information (vE, vdfE, vesc, vcirc, rhosun).
+        sample_dict: A dict as returned by the mocksample method in 
+            Nuclear class, which contains all the binned mock samples.
+        """
         self.nr = nr
-        self.s = sample_dict
-        self.ni = bsamp['binnedsample'][0]
-        self.bins = bsamp['bins']
-        
-
-    def findllnorm(self, mdm = 5., σp = 1e-45, bl = 0.001):
-        self.mdm_sdm(mdm, σp)
-        self.llnorm = 1.0
-        norm = np.abs(self.nllike(bl))
-        print (norm)
-        return norm
+        self.sd = sample_dict
+        self.λobs = self.sd['binned_Esample']
+        self.Eedges = self.sd['E_bins']
+        self.Egap = self.Eedges[1] - self.Eedges[0]
 
     def mdm_sdm(self, mdm, σp):
+        """
+        Returns the number of signal events in each bin for the given
+        value of mdm and σp. The number of events are computed using
+        the pre-computed values of λsg for 1000 values of mdm in the
+        range (1, 10) GeV and σp = 1e-46 cm^2 as returned by the 
+        binTot_mdm_array() method of Nuclear class. 
+        """
         self.mdm = mdm
         self.σp = σp
+        indx = np.abs(self.nr.mdm_array - mdm).argmin()
+        self.λsg0 = self.nr.bintots[indx]['Neachbin']
+        self.λsg = self.λsg0*σp/self.nr.σ0
 
-    def nllike(self, bl):
-        E, λ = self.nr.binTot(self.bins, self.mdm, self.σp, bl)
-        ll = np.sum(self.ni * np.log(λ)) - np.sum(λ)
+    def nll_bl(self, Mdm, Sdm, bl_guess = 0.001):
+        Ngrid = len(Mdm)
+        Mgrid, Sgrid = np.zeros([Ngrid,Ngrid]), np.zeros([Ngrid,Ngrid])
+        bl_min = np.zeros([Ngrid,Ngrid])
+        ll_min = np.zeros([Ngrid,Ngrid])
+        
+        for i,mdm in enumerate(Mdm):
+            for j,sdm in enumerate(Sdm):
+                self.mdm_sdm(mdm, sdm)
+                res = minimize(self.nllike1, x0 = bl_guess)
+                bl_min[i,j] = res.x[0]
+                ll_min[i,j] = self.nllike1(res.x[0])
+                Mgrid[i,j] = mdm
+                Sgrid[i,j] = sdm
+        self.Mgrid = Mgrid
+        self.Sgrid = Sgrid
+        self.bl_min = bl_min
+        self.ll_min = ll_min
+        return (Mgrid, Sgrid, bl_min, ll_min)
+
+    def nllike1(self, bl):
+        """
+        Returns the negative log-likelihood for a given bl value
+        and for fixed mdm and sdm already in namespace (see mdm_sdm
+        above)
+        """
+        λbg = np.ones(self.λsg.size)*bl*self.nr.exposure*self.Egap
+        λ = self.λsg + λbg
+        if (np.sum(λ) > 10.*np.sum(self.λobs)) or (np.sum(λ) < np.sum(self.λobs)/10.):
+            return 1e32
+        ll = np.sum(self.λobs * np.log(λ)) - np.sum(λ)
         if np.isfinite(ll) == False:
             ll = np.nan_to_num(ll, nan=-1e32, posinf=-1e32, neginf=-1e-32)
         return -ll
 
-    # If Npred is >> Ntot or Npred << Ntot likelihood can give a very small number.
+
 
         
         
 
-
+# m = Minuit(self.nllike, bl = bl_guess)
+# m.limits['bl'] = bl_limit
+# m.errordef = Minuit.LIKELIHOOD
+# m.migrad()
+# bl_min[i,j] = m.values['bl']
+# ll_min[i,j] = m.fval
 
 
 
