@@ -177,3 +177,5 @@ Output/chains_lcdm_reg_DDGB_8kpc.pkl
 Output/MW_vdf_chain.pkl
 Output/result_1.pkl
 Output/figures/nuclear/others
+Output/nuclear_dict.pkl
+Output/mdm_dict.pkl
