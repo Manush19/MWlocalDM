@@ -340,6 +340,11 @@ class ProfileLikelihood:
         self.λsg = self.λsg0*σp/self.nr.σ0
 
     def nll_bl(self, Mdm, Sdm, bl_guess = 0.001):
+        """
+        This minimizes the likelihood with the nuciance parameter {bl}
+        at grid points of mdm and σp and return the minimum likelihood
+        at (m,σp) and the MLE of {bl} at (m,σp)
+        """
         Ngrid = len(Mdm)
         Mgrid, Sgrid = np.zeros([Ngrid,Ngrid]), np.zeros([Ngrid,Ngrid])
         bl_min = np.zeros([Ngrid,Ngrid])
@@ -373,6 +378,14 @@ class ProfileLikelihood:
         if np.isfinite(ll) == False:
             ll = np.nan_to_num(ll, nan=-1e32, posinf=-1e32, neginf=-1e-32)
         return -ll
+
+    def nllike2(self, bl, η):
+        """
+        Returns the negative log-likelihood for a given bl value and 
+        η for a fixed mdm and sdm already in namespace (see mdm_sdm).
+        The p.d.f for η for a given mdm and sdm was precalculated 
+        using the VDF chains obtained from fitting RC of MW.
+        """
 
 
 
