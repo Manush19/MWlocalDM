@@ -288,6 +288,9 @@ class Nuclear:
             N = N
         elif Ntot == 'poisson':
             N = np.random.poisson(N, 1)
+        else:
+            print ('Please give a valid key word Ntot')
+            return None
 
         Esample = []
         for u in np.random.uniform(0, 1, size=int(np.floor(N))):
@@ -299,12 +302,15 @@ class Nuclear:
         return {'Esample': np.array(Esample), 
                 'E_array': E_array,
                 'binned_Esample': hist[0],
-                'E_bins': hist[1],
+                'bin_edges': hist[1],
                 'pdf': pdf,
                 'cdf': cdf,
                 'pdfsg': pdfsg,
                 'pdfbg': pdfbg,
-                'N_obs': int(np.floor(N))}
+                'N_obs': int(np.floor(N)),
+                'Nbins': Nbins}
+
+
 
 
 
@@ -382,10 +388,18 @@ class ProfileLikelihood:
     def nllike2(self, bl, η):
         """
         Returns the negative log-likelihood for a given bl value and 
-        η for a fixed mdm and sdm already in namespace (see mdm_sdm).
+        η for a fixed mdm and sdm already in namespace 
+        (see self.mdm_sdm()).
         The p.d.f for η for a given mdm and sdm was precalculated 
         using the VDF chains obtained from fitting RC of MW.
         """
+
+
+    def min_bl(nobs, λsg, ΔE):
+        def func(bl):
+            mean = np.mean(nobs/(λsg + bl*ΔE))
+            return mean - 1.0
+        
 
 
 
