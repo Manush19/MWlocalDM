@@ -2,12 +2,20 @@ import numpy as np
 import scipy as sp
 from scipy.signal import medfilt
 from scipy.stats import poisson
-from scipy.optimize import minimize
+from scipy.optimize import minimize, fsolve, bisect
 from project.constants import MW_params as pm
 from iminuit import Minuit
 import project.quadrantHopping as quadH
 import warnings
-warnings.filterwarnings('ignore', message = 'invalid value encountered in log')
+import pickle
+import math
+from tqdm.notebook import tqdm
+
+MW_dict = pickle.load(open('../Output/MW_dict.pkl','rb'))
+MWlike = pickle.load(open('../Output/MWlike_dict.pkl','rb'))
+mwd = MW_dict['vdf_RCfit']
+mwgals = MWlike['mwgals']
+mwld = MWlike['vdf_RCfit']
 
 norm = lambda f, x: f/np.trapz(f, x) if not np.all(f == 0) else f
 p50 = lambda x: np.percentile(x, 50)
@@ -314,104 +322,277 @@ class Nuclear:
 
 
 
-class ProfileLikelihood:
-    def __init__(self, nr, sample_dict, **kwargs):
+class MLE:
+    def __init__(self, mock, nr_init, globalmin='smart', 
+                 likelihood=1, **kwargs):
         """
-        Attributes
-        ------------
-        nr: An instance of the Nuclear class (see above) representing
-            the experimental setup (Ethr, Eroi, ω) and the VDF 
-            information (vE, vdfE, vesc, vcirc, rhosun).
-        sample_dict: A dict as returned by the mocksample method in 
-            Nuclear class, which contains all the binned mock samples.
+        If likelilhood == 2, please provide the gal and idx
+        keywords arguments for the galaxy and chain no of the
+        VDF and ρ_sun to be used.
         """
-        self.nr = nr
-        self.sd = sample_dict
-        self.λobs = self.sd['binned_Esample']
-        self.Eedges = self.sd['E_bins']
-        self.Egap = self.Eedges[1] - self.Eedges[0]
+        self.mock = mock
+        self.nr = nr_init
+        self.nobs = self.mock['binned_Esample']
+        self.ΔE = (self.nr.Eroi - self.nr.Ethr)/self.mock['Nbins']
+        self.exp = self.nr.exposure
 
-    def mdm_sdm(self, mdm, σp):
-        """
-        Returns the number of signal events in each bin for the given
-        value of mdm and σp. The number of events are computed using
-        the pre-computed values of λsg for 1000 values of mdm in the
-        range (1, 10) GeV and σp = 1e-46 cm^2 as returned by the 
-        binTot_mdm_array() method of Nuclear class. 
-        """
-        self.mdm = mdm
-        self.σp = σp
-        indx = np.abs(self.nr.mdm_array - mdm).argmin()
-        self.λsg0 = self.nr.bintots[indx]['Neachbin']
-        self.λsg = self.λsg0*σp/self.nr.σ0
+        self.gal = kwargs.get('gal') if 'gal' in kwargs.keys() else 'MW'
 
-    def nll_bl(self, Mdm, Sdm, bl_guess = 0.001):
-        """
-        This minimizes the likelihood with the nuciance parameter {bl}
-        at grid points of mdm and σp and return the minimum likelihood
-        at (m,σp) and the MLE of {bl} at (m,σp)
-        """
-        Ngrid = len(Mdm)
-        Mgrid, Sgrid = np.zeros([Ngrid,Ngrid]), np.zeros([Ngrid,Ngrid])
-        bl_min = np.zeros([Ngrid,Ngrid])
-        ll_min = np.zeros([Ngrid,Ngrid])
+        self.likelihood = likelihood
+        if self.likelihood == 1:
+            self.nlL = self.nlL1
+        elif self.likelihood == 2:
+            self.mwD = self.get_mwD(self.gal)
+            self.nlL = self.nlL2
+        elif self.likelihood == 3:
+            self.gals = ['MW'] + mwgals
+            self.nlL = self.nlL3
+            
+        if 'chainlen' in kwargs.keys():
+            self.chainlen = kwargs.get('chainlen')
+        else:
+            self.chainlen = len(mwd['vdfEs'])
+        # print (f'Running with chainlen = {self.chainlen}')
         
-        for i,mdm in enumerate(Mdm):
-            for j,sdm in enumerate(Sdm):
-                self.mdm_sdm(mdm, sdm)
-                res = minimize(self.nllike1, x0 = bl_guess)
-                bl_min[i,j] = res.x[0]
-                ll_min[i,j] = self.nllike1(res.x[0])
-                Mgrid[i,j] = mdm
-                Sgrid[i,j] = sdm
-        self.Mgrid = Mgrid
-        self.Sgrid = Sgrid
-        self.bl_min = bl_min
-        self.ll_min = ll_min
-        return (Mgrid, Sgrid, bl_min, ll_min)
+        if globalmin:
+            self.globalmin(Mdm=globalmin)
+        else:
+            self.ran_globalmin = False
 
-    def nllike1(self, bl):
-        """
-        Returns the negative log-likelihood for a given bl value
-        and for fixed mdm and sdm already in namespace (see mdm_sdm
-        above)
-        """
-        λbg = np.ones(self.λsg.size)*bl*self.nr.exposure*self.Egap
-        λ = self.λsg + λbg
-        if (np.sum(λ) > 10.*np.sum(self.λobs)) or (np.sum(λ) < np.sum(self.λobs)/10.):
+    def globalmin(self, Mdm = 'smart'):
+        self.ran_globalmin = True
+        if isinstance(Mdm, str) and Mdm == 'smart':
+            Mdm_try1 = np.linspace(1,10,20)
+            self.fd_globalmin(Mdm_try1)
+            indx = np.where(self.Tq <= 5.99)[0]
+            mdm_low = Mdm_try1[indx[0]-1]
+            mdm_hig = Mdm_try1[indx[-1]+1]           
+            Mdm_try2 = np.linspace(mdm_low, mdm_hig, 100)
+            self.fd_globalmin(Mdm_try2)
+
+        elif isinstance(Mdm, str) and Mdm == 'precise':
+            Mdm_try1 = np.linspace(1,10,20)
+            self.fd_globalmin(Mdm_try1)
+            indx = np.where(self.Tq == np.min(self.Tq))[0]
+            mdm_low = Mdm_try1[indx[0]-1]
+            mdm_hig = Mdm_try1[indx[-1]+1]
+            Mdm_try2 = np.linspace(mdm_low, mdm_hig, 10)
+            self.fd_globalmin(Mdm_try2)
+            indx = np.where(self.Tq == np.min(self.Tq))[0]
+            mdm_low = Mdm_try2[indx[0]-1]
+            mdm_hig = Mdm_try2[indx[-1]+1]
+            Mdm_try3 = np.linspace(mdm_low, mdm_hig, 10)
+            self.fd_globalmin(Mdm_try3)
+
+        elif isinstance(Mdm, np.ndarray):
+            self.fd_globalmin(Mdm)
+        else:
+            self.fd_globalmin(np.linspace(1,10,10))
+
+    def fd_globalmin(self, Mdm):
+        self.Mdm = Mdm
+        self.λsg0s = self.get_λsg0s()
+        best = self.get_best()
+        self.Sdm, self.Nll = best
+
+        self.minindx = np.where(self.Nll == np.min(self.Nll))[0][0]
+        self.mdm_min = self.Mdm[self.minindx]
+        self.sdm_min = self.Sdm[self.minindx]
+        self.nll_min = self.Nll[self.minindx]
+        self.Tq = 2*(self.Nll - self.nll_min)
+
+    def get_Tgrid(self):
+        if not self.ran_globalmin:
+            print ('self.globalmin() is running for the first time')
+            self.globalmin()
+
+        Mdm = np.linspace(2,5,30)
+        Sdm = np.logspace(-46, np.log10(3e-45), 30)
+        self.Mdm = Mdm
+        self.λsg0s = self.get_λsg0s()
+        Mgrid = np.zeros([self.Mdm.size]*2)
+        Sgrid = np.zeros([self.Mdm.size]*2)
+        Lgrid = np.zeros([self.Mdm.size]*2)
+        for mi, mdm in enumerate(Mdm):
+            for si, sdm in enumerate(Sdm):
+                Mgrid[mi,si] = mdm
+                Sgrid[mi,si] = sdm
+                Lgrid[mi,si] = self.lsdm̂_func(np.log10(sdm), mdm)
+        Tgrid = 2*(Lgrid - np.min(Lgrid))
+        return Mgrid, Sgrid, Lgrid, Tgrid
+        
+
+    def get_limits(self, tq_limit=5.99):
+        if not self.ran_globalmin:
+            print ('self.globalmin() is running for the first time')
+            self.globalmin()
+            
+        Mdm_ = []
+        Sdm_upp = []
+        Sdm_low = []
+        for i,mdm in enumerate(self.Mdm):
+            if self.Tq[i] > 5.99:
+                continue
+            def func(lsdm):
+                nll = self.lsdm̂_func(lsdm, mdm)
+                tq = 2*(nll - self.nll_min)
+                return tq - tq_limit
+            solupp = bisect(func, np.log10(self.Sdm[i]), -44)
+            sollow = bisect(func, -46, np.log10(self.Sdm[i]))
+            
+            Sdm_upp.append(math.pow(10, solupp))
+            Sdm_low.append(math.pow(10, sollow))
+            Mdm_.append(mdm)
+        return [np.array(Mdm_), np.array(Sdm_upp), 
+                np.array(Sdm_low)]
+
+    def get_mwD(self, gal):
+        if gal == 'MW':
+            return mwd
+        elif gal in mwgals:
+            return mwld[gal]
+        else:
+            print (f'gal = {gal} is not MW or MWlike')
+
+    def jpdf_max_idx(self, gal):
+        return 100
+
+    def get_λsg0s(self):
+        if self.likelihood == 1:
+            λsg0s = []
+            for mdm in self.Mdm:
+                binT = self.nr.binTot(mdm, 1e-46, 0.,
+                                      self.mock['bin_edges'])
+                λsg0s.append(binT['Neachbin'])
+            return λsg0s
+        elif self.likelihood == 2:
+            λsg0s_chains = []
+            for ci in range(self.chainlen):
+                if self.chainlen == 1:
+                    ci = self.jpdf_max_idx(self.gal)
+                nr_ = Nuclear(self.nr.element, vE=self.mwD['vE'],
+                              vdfE = self.mwD['vdfEs'][ci],
+                              vesc = self.mwD['vescs'][ci],
+                              vcirc = self.mwD['vcircs'][ci],
+                              rhosun = self.mwD['rhosuns'][ci],
+                              Ethr = self.nr.Ethr,
+                              Eroi = self.nr.Eroi,
+                              ω = self.nr.ω)
+                λsg0s = []
+                for mdm in self.Mdm:
+                    binT = nr_.binTot(mdm, 1e-46, 0., 
+                                      self.mock['bin_edges'])
+                    λsg0s.append(binT['Neachbin'])
+                λsg0s_chains.append(λsg0s)
+            return λsg0s_chains
+        elif self.likelihood == 3:
+            λsg0s_gals = []
+            for gal in self.gals:
+                mwD = self.get_mwD(gal)
+                λsg0s_chains = []
+                for ci in range(self.chainlen):
+                    if self.chainlen == 1:
+                        ci = self.jpdf_max_idx(gal)
+                    nr_ = Nuclear(self.nr.element, vE=mwD['vE'],
+                                  vdfE = mwD['vdfEs'][ci],
+                                  vesc = mwD['vescs'][ci],
+                                  vcirc = mwD['vcircs'][ci],
+                                  rhosun = mwD['rhosuns'][ci],
+                                  Ethr = self.nr.Ethr,
+                                  Eroi = self.nr.Eroi,
+                                  ω = self.nr.ω)
+                    λsg0s = []
+                    for mdm in self.Mdm:
+                        binT = nr_.binTot(mdm, 1e-46, 0., 
+                                      self.mock['bin_edges'])
+                        λsg0s.append(binT['Neachbin'])
+                    λsg0s_chains.append(λsg0s)
+                λsg0s_gals.append(λsg0s_chains)
+            return λsg0s_gals
+                    
+    def λsg0(self, mdm, idx=None, gal=None):
+        indx = np.where(self.Mdm == mdm)[0][0]
+        if self.likelihood == 1:
+            return self.λsg0s[indx]
+        elif self.likelihood == 2:
+            return self.λsg0s[idx][indx]
+        elif self.likelihood == 3:
+            gali = self.gals.index(gal)
+            return self.λsg0s[gali][idx][indx]
+
+    def λsg(self, mdm, sdm, idx=None, gal=None):
+        return self.λsg0(mdm, idx, gal)*sdm/1e-46
+
+    def nlL1(self, mdm, sdm, bl, idx=None, gal=None):
+        λ = self.λsg(mdm, sdm, idx, gal) + self.exp*self.ΔE*bl
+        lL = np.sum(self.nobs*np.log(λ)) - np.sum(λ)
+        nlL = -lL
+        nlL = 1e32 if np.isnan(nlL) else nlL
+        return nlL
+
+    def nlL2(self, mdm, sdm, bl, idx, gal):
+        nlL = self.nlL1(mdm, sdm, bl, idx, gal)
+        # nlL -= np.log(np.prod(self.get_mwD(gal)['par_pdfs'][idx]))
+        nlL = 1e32 if np.isnan(nlL) else nlL
+        return nlL
+
+    def nlL3(self, mdm, sdm, bls, idxs, gals):
+        nll_gals = []
+        for gal, idx, bl in zip(gals, idxs, bls):
+            nll_gals.append(self.nlL2(mdm, sdm, bl, idx, gal))
+        nlL = np.array(nll_gals).sum()
+        nlL = 1e32 if np.isnan(nlL) else nlL
+        return nlL
+
+    def get_best(self):
+        Sdm, Nll = [],[]
+        for mdm in self.Mdm:
+            sdm, nll = self.min_sdm(mdm)
+            Sdm.append(sdm)
+            Nll.append(nll)
+        return (np.array(Sdm), np.array(Nll))
+
+    def min_sdm(self, mdm):
+            minz = minimize(self.lsdm̂_func, x0=[-45], args=(mdm))
+            return (math.pow(10, minz.x[0]), minz.fun)
+
+    def lsdm̂_func(self, lsdm, mdm):
+        if lsdm > -30:
             return 1e32
-        ll = np.sum(self.λobs * np.log(λ)) - np.sum(λ)
-        if np.isfinite(ll) == False:
-            ll = np.nan_to_num(ll, nan=-1e32, posinf=-1e32, neginf=-1e-32)
-        return -ll
+        sdm = math.pow(10, lsdm)
+        if self.likelihood == 1:
+            blm = fsolve(self.bl̂_func, [0.001], args=(mdm, sdm))[0]
+            return self.nlL1(mdm, sdm, blm)
+        elif self.likelihood == 2:
+            nlls = []
+            for idx in range(self.chainlen):
+                blm = fsolve(self.bl̂_func, [0.001], 
+                             args=(mdm,sdm,idx,self.gal))[0]
+                nlls.append(self.nlL2(mdm, sdm, blm, idx, self.gal))
+            return np.min(nlls)
+        elif self.likelihood == 3:
+            idxs, bls = [], []
+            for gal in self.gals:
+                blms, nlls = [], []
+                for idx in range(self.chainlen):
+                    blm = fsolve(self.bl̂_func, [0.001], 
+                                 args=(mdm, sdm, idx, gal))[0]
+                    blms.append(blm)
+                    nlls.append(self.nlL2(mdm, sdm, blm, idx, gal))
+                nlls = np.array(nlls)
+                idx_min = np.where(nlls == nlls.min())[0][0]
+                idxs.append(idx_min)
+                bls.append(blms[idx_min])
+            return self.nlL3(mdm, sdm, bls, idxs, self.gals)
 
-    def nllike2(self, bl, η):
-        """
-        Returns the negative log-likelihood for a given bl value and 
-        η for a fixed mdm and sdm already in namespace 
-        (see self.mdm_sdm()).
-        The p.d.f for η for a given mdm and sdm was precalculated 
-        using the VDF chains obtained from fitting RC of MW.
-        """
+    def bl̂_func(self, bl, mdm, sdm, idx=None, gal=None):
+        λ = self.λsg(mdm,sdm,idx,gal) + self.exp*bl*self.ΔE
+        return np.mean(self.nobs/λ) - 1.0
 
+    def min_bl(self, mdm, sdm, idx=None, gal=None):
+        fsol = fsolve(self.bl̂_func, x0=[0.001], args=(mdm,sdm,idx,gal))
+        return fsol[0]
 
-    def min_bl(nobs, λsg, ΔE):
-        def func(bl):
-            mean = np.mean(nobs/(λsg + bl*ΔE))
-            return mean - 1.0
-        
-
-
-
-        
-        
-
-# m = Minuit(self.nllike, bl = bl_guess)
-# m.limits['bl'] = bl_limit
-# m.errordef = Minuit.LIKELIHOOD
-# m.migrad()
-# bl_min[i,j] = m.values['bl']
-# ll_min[i,j] = m.fval
 
 
 
