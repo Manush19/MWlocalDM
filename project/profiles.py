@@ -1,7 +1,7 @@
 import numpy as np
 import scipy as sp
 import scipy.integrate as simps
-from project.constants import Constants as c
+from project.tools.constants import Constants as c
 from scipy import special
 
 def arctan(x):

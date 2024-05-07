@@ -1,9 +1,11 @@
 import numpy as np
 import scipy as sp
 import sys,json,os
+sys.path.append('../')
 sys.path.append('../..')
+sys.path.append('../../..')
 import project.profiles as pp
-from project.constants import Constants as pc
+from project.tools.constants import Constants as pc
 
 import warnings
 warnings.filterwarnings('ignore')

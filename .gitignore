@@ -159,8 +159,6 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Ignore Ultraroot
-Output/Ultra/
 
 # Ignore Acessory folder (~600 MB)
 # Contains:
@@ -177,8 +175,15 @@ Output/chains_lcdm_reg_DDGB_8kpc.pkl
 Output/MW_vdf_chain.pkl
 Output/result_1.pkl
 Output/result_2.pkl
-Output/figures/nuclear/others
+Output/figures/nuclear/other
+Output/figures/nuclear/before_vscode
 Output/nuclear_dict.pkl
+Output/rate_prediction.pkl
+Output/MW_dict.pkl
+Output/MWlike_dict.pkl
 Ouptut/Nuclear_dict.pkl
 Output/Nuclear_dict_old.pkl
 Output/mdm_dict.pkl
+
+# Ignore Ultraroot
+Output/Ultra/
