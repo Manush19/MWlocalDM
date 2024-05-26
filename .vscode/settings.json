@@ -1,6 +1,6 @@
 {
     "notebook.stickyScroll.enabled": true,
     "notebook.diff.overviewRuler": true,
-    "python.analysis.autoImportCompletions": false,
+    "python.analysis.autoImportCompletions": true,
     "python.analysis.typeCheckingMode": "off"
 }
