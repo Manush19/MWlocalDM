@@ -3,6 +3,7 @@ import scipy as sp
 from scipy.signal import medfilt
 from scipy.stats import poisson
 from scipy.optimize import minimize, fsolve, bisect
+from scipy.interpolate import interp1d
 from project.tools.constants import MW_params as pm
 from iminuit import Minuit
 import project.tools.quadrantHopping as quadH
@@ -356,6 +357,13 @@ class Electron:
 
         self.Fdm_n = kwargs.get('Fdm_n') if 'Fdm_n' in kwargs.keys() else 0
 
+        if 'Ee' in kwargs.keys():
+            self.Ee = kwargs.get('Ee')
+        else:
+            self.Ee = np.linspace(0,49,50)
+
+        self.exposure = 1
+
     def materialinfo(self):
         data = np.loadtxt(f'../../Accessory/{self.material}_f2.txt',skiprows=1)
         fcrys = np.transpose(np.resize(data,(self.nEe,self.nq)))
@@ -405,12 +413,13 @@ class Electron:
             η.append(int1 - int2)
         return np.array(η)*1e-5
     
-    def dRdEe(self, mdm, sdm, Ee):
+    def diffSg(self, mdm, sdm, Ee='self'):
+        if isinstance(Ee, str) and Ee == 'self':
+            Ee = self.Ee
         mdm = mdm*1e6 #MeV to eV conversion
-        if mdm == 0:
+        if mdm == 0 or sdm == 0:
             return np.ones(np.shape(Ee))*1e-15
         qi = np.arange(0, self.nq, 1)
-        self.qi = qi
         q = (qi+1)*self.Δq
         rate = []
         for Ee_ in Ee:
@@ -422,10 +431,73 @@ class Electron:
                 η = self.velInt(vmin)
                 fsq = self.Fdm(q)**2 * self.fcrys[qi, Ei-1]
                 integrand = (1/q)*fsq*η
-            # rate.append(np.trapz(integrand, q))
                 rate.append(np.sum(integrand))
         return np.array(rate)*self.preFactor(mdm, sdm)
     
+
+    def diffBg(self, bl=0., Ee='self'):
+        if isinstance(Ee, str) and Ee == 'self':
+            Ee = self.Ee
+        bl = 1e-32 if bl <= 0 else bl
+        rate = np.ones(np.shape(Ee)) * bl
+        rate[Ee < self.Egap] = 0
+        return rate
+    
+    def diffTot(self, mdm, sdm, bl=0., Ee='self'):
+        return self.diffSg(mdm, sdm, Ee) + self.diffBg(bl, Ee)
+    
+    def totNsg(self, mdm, sdm, Ee='self', exposure='self'):
+        if isinstance(Ee, str) and Ee == 'self':
+            Ee = self.Ee
+        if isinstance(exposure, str) and exposure == 'self':
+            exposure = self.exposure
+        return exposure*np.trapz(self.diffSg(mdm, sdm, Ee=Ee), Ee)
+    
+    def totNbg(self, bl, Ee='self', exposure='self'):
+        if isinstance(Ee, str) and Ee == 'self':
+            Ee = self.Ee 
+        if isinstance(exposure, str) and exposure == 'self':
+            exposure = self.exposure
+        return exposure*bl*(Ee[-1] - Ee[0])
+    
+    def totNtot(self, mdm, sdm, bl=0., Ee='self', exposure='self'):
+        if isinstance(Ee, str) and Ee == 'self':
+            Ee = self.Ee 
+        if isinstance(exposure, str) and exposure == 'self':
+            exposure = self.exposure 
+        return exposure*np.trapz(self.diffTot(mdm, sdm, bl, Ee=Ee), Ee)
+        
+    def binTot(self, mdm, sdm, bl, binwidth):
+        Nbins = int(np.floor(self.nEe*self.ΔEe/binwidth))
+        bins = np.array([self.Egap + i*binwidth for i in range(Nbins)])
+        accuracy = int(np.floor(binwidth/self.ΔEe))
+        tmp_dRdE = np.zeros(accuracy)
+        bint = np.zeros(Nbins)
+        for ne in range(Nbins-1):
+            for i in range(accuracy):
+                Ee_ = self.Egap + ne*binwidth + self.ΔEe*i
+                tmp_dRdE[i] = self.diffTot(mdm, sdm, bl, Ee = [Ee_])[0]
+            bint[ne] = np.sum(tmp_dRdE, axis=0)
+        return {'Neachbin': bint,
+                'E_center': 0.5*(bins[:-1]+bins[1:]),
+                'E_edges': bins,
+                'accuracy': accuracy,
+                'mdm': mdm,
+                'sdm': sdm,
+                'bl': bl} 
+
+    def mocksample(self, mdm, sdm, bl, binwidth, Ntot='mean', seed=None, **kwargs):
+        exposure = kwargs.get('exposure') if 'exposure' in kwargs.keys() else self.exposure
+        
+        Nbins = int(np.floor(self.nEe*self.ΔEe/binwidth))
+        Eebins = np.array([self.Egap + i*binwidth for i in range(Nbins)])
+
+        Ee_array = np.linspace(self.Egap, self.Eroi)
+
+
+        
+        
+        
 
     
 

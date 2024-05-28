@@ -187,3 +187,5 @@ Output/mdm_dict.pkl
 
 # Ignore Ultraroot
 Output/Ultra/
+/git-pip.py
+/git-pip.py.1
