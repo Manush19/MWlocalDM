@@ -329,6 +329,28 @@ class Nuclear:
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 class Electron:
     def __init__(self, element, vE, vdfE, vesc, vcirc, rhosun, **kwargs) -> None:
         self.material = element
@@ -353,6 +375,7 @@ class Electron:
 
         self.nq, self.nEe = 900, 500 #no of bins in q and Ee respectively where fcrys was computed
         self.Δq, self.ΔEe = 0.02*self.alpha*self.me_eV, 0.1 #eV binwidths of q and Ee used for computing fcrys
+        self.qmax, self.Emax = self.nq*self.Δq, self.nEe*self.ΔEe
         self.Mcell, self.fcrys_prefactor, self.Egap, self.ε, self.fcrys = self.materialinfo()
 
         self.Fdm_n = kwargs.get('Fdm_n') if 'Fdm_n' in kwargs.keys() else 0
@@ -362,7 +385,14 @@ class Electron:
         else:
             self.Ee = np.linspace(0,49,50)
 
-        self.exposure = 1
+        self.ω = 1
+        if self.material == 'Si':
+            self.binwidth = 3.8
+        else:
+            print ('Please fix the binwidth here! it only given for Si as of now')
+        self.Nbins = int(np.floor(self.nEe*self.ΔEe/self.binwidth))
+        self.bins = np.array([self.Egap + i*self.binwidth for i in range(self.Nbins)])
+        self.accuracy = int(np.floor(self.binwidth/self.ΔEe)) + 2
 
     def materialinfo(self):
         data = np.loadtxt(f'../../Accessory/{self.material}_f2.txt',skiprows=1)
@@ -413,9 +443,8 @@ class Electron:
             η.append(int1 - int2)
         return np.array(η)*1e-5
     
-    def diffSg(self, mdm, sdm, Ee='self'):
-        if isinstance(Ee, str) and Ee == 'self':
-            Ee = self.Ee
+    def diffSg(self, mdm, sdm, **kwargs):
+        Ee = kwargs.get('Ee') if 'Ee' in kwargs.keys() else self.Ee 
         mdm = mdm*1e6 #MeV to eV conversion
         if mdm == 0 or sdm == 0:
             return np.ones(np.shape(Ee))*1e-15
@@ -435,65 +464,118 @@ class Electron:
         return np.array(rate)*self.preFactor(mdm, sdm)
     
 
-    def diffBg(self, bl=0., Ee='self'):
-        if isinstance(Ee, str) and Ee == 'self':
-            Ee = self.Ee
+    def diffBg(self, bl=0., **kwargs):
+        Ee = kwargs.get('Ee') if 'Ee' in kwargs.keys() else self.Ee 
         bl = 1e-32 if bl <= 0 else bl
         rate = np.ones(np.shape(Ee)) * bl
         rate[Ee < self.Egap] = 0
         return rate
     
-    def diffTot(self, mdm, sdm, bl=0., Ee='self'):
-        return self.diffSg(mdm, sdm, Ee) + self.diffBg(bl, Ee)
+    def diffTot(self, mdm, sdm, bl=0., **kwargs):
+        return self.diffSg(mdm, sdm, **kwargs) + self.diffBg(bl, **kwargs)
     
-    def totNsg(self, mdm, sdm, Ee='self', exposure='self'):
-        if isinstance(Ee, str) and Ee == 'self':
-            Ee = self.Ee
-        if isinstance(exposure, str) and exposure == 'self':
-            exposure = self.exposure
+    def totNsg(self, mdm, sdm, **kwargs):
+        Ee = kwargs.get('Ee') if 'Ee' in kwargs.keys() else self.Ee 
+        ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
+        Ee = Ee[Ee >= self.Egap]
+        exposure = ω
         return exposure*np.trapz(self.diffSg(mdm, sdm, Ee=Ee), Ee)
     
-    def totNbg(self, bl, Ee='self', exposure='self'):
-        if isinstance(Ee, str) and Ee == 'self':
-            Ee = self.Ee 
-        if isinstance(exposure, str) and exposure == 'self':
-            exposure = self.exposure
+    def totNbg(self, bl, **kwargs):
+        # bl is in units of (kg yr eV)^-1
+        Ee = kwargs.get('Ee') if 'Ee' in kwargs.keys() else self.Ee 
+        ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
+        Ee = Ee[Ee >= self.Egap]
+        exposure = ω #in kg yr
         return exposure*bl*(Ee[-1] - Ee[0])
     
-    def totNtot(self, mdm, sdm, bl=0., Ee='self', exposure='self'):
-        if isinstance(Ee, str) and Ee == 'self':
-            Ee = self.Ee 
-        if isinstance(exposure, str) and exposure == 'self':
-            exposure = self.exposure 
-        return exposure*np.trapz(self.diffTot(mdm, sdm, bl, Ee=Ee), Ee)
+    def totNtot(self, mdm, sdm, bl=0., **kwargs):
+        return self.totNsg(mdm, sdm, **kwargs) + self.totNbg(bl, **kwargs)
         
-    def binTot(self, mdm, sdm, bl, binwidth):
-        Nbins = int(np.floor(self.nEe*self.ΔEe/binwidth))
-        bins = np.array([self.Egap + i*binwidth for i in range(Nbins)])
-        accuracy = int(np.floor(binwidth/self.ΔEe))
-        tmp_dRdE = np.zeros(accuracy)
-        bint = np.zeros(Nbins)
-        for ne in range(Nbins-1):
-            for i in range(accuracy):
-                Ee_ = self.Egap + ne*binwidth + self.ΔEe*i
-                tmp_dRdE[i] = self.diffTot(mdm, sdm, bl, Ee = [Ee_])[0]
-            bint[ne] = np.sum(tmp_dRdE, axis=0)
+    def binTot(self, mdm, sdm, bl, **kwargs):
+        ω = kwargs.get('ω') if 'ω' in kwargs.keys() else self.ω
+        bint = np.zeros(self.Nbins-1)
+        for ne in range(self.Nbins-1):
+            Ee_ = self.Egap + ne*self.binwidth + self.ΔEe*np.arange(0, self.accuracy, 1)
+            bint[ne] = self.totNtot(mdm, sdm, bl, Ee=Ee_, ω=ω)
+        bint[bint <= 0] = 1e-32
         return {'Neachbin': bint,
-                'E_center': 0.5*(bins[:-1]+bins[1:]),
-                'E_edges': bins,
-                'accuracy': accuracy,
                 'mdm': mdm,
                 'sdm': sdm,
                 'bl': bl} 
 
+    def sdmMdmNsg(self, Mdm, N=1, sdm0=1e-40, **kwargs):
+        isfloat = True if isinstance(Mdm, float) else False 
+        Mdm = np.array([Mdm]) if isfloat else Mdm 
+
+        if 'Ee' in kwargs.keys():
+            Ee = kwargs.get(Ee)
+        else:
+            Ee = self.Ee
+        
+        if 'Ne_thr' in kwargs.keys():
+            Ne_thr = kwargs.get('Ne_thr')
+            Ee_thr = self.Egap + (Ne_thr - 1)*self.ε
+            Ee = Ee[Ee >= Ee_thr]
+        else:
+            Ee = Ee[Ee >= self.Egap]
+
+        if 'exposure' in kwargs.keys():
+            exposure = kwargs.get('exposure')
+        else:
+            exposure = self.exposure
+
+        N0 = np.zeros(Mdm.shape) 
+        for i,mdm in tqdm(enumerate(Mdm)):
+            N0[i] = self.totNsg(mdm, sdm0, Ee=Ee, exposure=exposure)
+        N0[N0 <= 0] = 1e-32
+        return sdm0/N0 
+
     def mocksample(self, mdm, sdm, bl, binwidth, Ntot='mean', seed=None, **kwargs):
         exposure = kwargs.get('exposure') if 'exposure' in kwargs.keys() else self.exposure
+        Ee_array = np.linspace(self.Egap, 49, 50)
+
+        pdfsg = self.diffSg(mdm, sdm, Ee=Ee_array)
+        pdfbg = self.diffBg(bl, Ee=Ee_array)
+        pdfsg = np.zeros(Ee_array.shape) if mdm == 0 else pdfsg
+        pdfbg = np.zeros(Ee_array.shape) if bl == 0 else pdfbg 
+        pdf = pdfsg + pdfbg 
+        pdf = norm(pdf, Ee_array)
+
+        cdf = np.cumsum(pdf) 
+        cdf = cdf/cdf[-1] 
+
+        if seed:
+            np.random.seed(seed)
+        N = self.totNtot(mdm, sdm, Ee=Ee_array, exposure=exposure)
+
+        if Ntot == 'mean':
+            N = N
+        elif Ntot == 'poisson': 
+            N = np.random.poisson(N, 1) 
+        else:
+            print ('Please give a valid key work Ntot')
+            return None
         
-        Nbins = int(np.floor(self.nEe*self.ΔEe/binwidth))
-        Eebins = np.array([self.Egap + i*binwidth for i in range(Nbins)])
+        Eesample = [] 
+        for u in np.random.uniform(0, 1, size=int(np.floor(N))): 
+            index = (np.abs(cdf - u).argmin()) 
+            Eesample.append(Ee_array[[index]]) 
 
-        Ee_array = np.linspace(self.Egap, self.Eroi)
+        hist = np.histogram(Eesample, bins=self.bins)
 
+        return {'Eesample': np.array(Eesample), 
+                'Ee_array': Ee_array,
+                'binned_Esample': hist[0],
+                'bin_edges': hist[1],
+                'pdf': pdf,
+                'cdf': cdf,
+                'pdfsg': pdfsg,
+                'pdfbg': pdfbg,
+                'N_obs': int(np.floor(N)),
+                'Nbins': self.Nbins, 
+                'binwidth': self.binwidth,
+                'exposure': exposure}
 
         
         
