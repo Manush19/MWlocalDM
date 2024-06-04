@@ -1,11 +1,11 @@
-import math 
-from joblib import parallel_backend
+import math
+from time import perf_counter 
 import numpy as np 
 from numpy.core.function_base import linspace as linspace
 import pandas as pd
 from scipy.optimize import fsolve, bisect, minimize 
 import sys, os, pickle 
-from tqdm.notebook import tqdm 
+from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
 sys.path.append('../../')
@@ -52,36 +52,46 @@ class MLE:
         return mwld[gal]
         
     def get_best(self, Mdm):
-        Sdm, Nll = [], []
-        for mdm in Mdm:
-            sdm, nll = self.min_sdm(mdm)
-            Sdm.append(sdm)
-            Nll.append(nll)
+        with Pool(processes=os.cpu_count()) as pool:
+            Sdm, Nll = [], []
+            for result in pool.imap(self.min_sdm, Mdm):
+                Sdm.append(result[0])
+                Nll.append(result[1])
         return (np.array(Sdm), np.array(Nll))
         
     def min_sdm(self, mdm):
         minz = minimize(self.lsdm_func, x0=[-38.], args=(mdm))
         return (math.pow(10, minz.x[0]), minz.fun)
-    
+
+    def limit_fn(self, mdm):
+        idx = np.where(self.Mdm == mdm)[0][0]
+        if self.Tq[idx] > self.tq_limit:
+            return (0, 0)
+        def func(lsdm):
+            nll = self.lsdm_func(lsdm, mdm)
+            tq = 2*(nll - self.nll_min)
+            return tq - self.tq_limit
+        solupp = bisect(func, np.log10(self.Sdm[idx]), -34.0)
+        sollow = bisect(func, -42.0, np.log10(self.Sdm[idx]))
+        return (mdm, math.pow(10, solupp), math.pow(10, sollow))
+
     def get_limits(self, Mdm, tq_limit=5.99):
         if not self.ran_globalmin:
             print (f'Running self.globalmin() for the first time')
             self.globalmin(Mdm)
+        self.tq_limit=tq_limit
+        self.Mdm = Mdm
         Mdm_lim = []
         Sdm_upp = []
         Sdm_low = []
-        for i,mdm in enumerate(Mdm):
-            if self.Tq[i] > tq_limit:
-                continue
-            def func(lsdm):
-                nll = self.lsdm_func(lsdm, mdm)
-                tq = 2*(nll - self.nll_min)
-                return tq - tq_limit
-            solupp = bisect(func, np.log10(self.Sdm[i]), -34.0)
-            sollow = bisect(func, -42.0, np.log10(self.Sdm[i]))
-            Sdm_upp.append(math.pow(10, solupp))
-            Sdm_low.append(math.pow(10, sollow))
-            Mdm_lim.append(mdm)
+        with Pool(processes=os.cpu_count()) as pool:
+            for result in pool.imap(self.limit_fn, Mdm):
+                if 0 in result:
+                    continue 
+                else:
+                    Mdm_lim.append(result[0])
+                    Sdm_upp.append(result[1])
+                    Sdm_low.append(result[2])
         return (np.array(Mdm_lim), np.array(Sdm_upp), np.array(Sdm_low))
     
     def get_Tgrid(self, Mdm=np.linspace(1,10,20), Sdm = np.logspace(-40., -37, 20)):
@@ -179,13 +189,14 @@ class MassModelUncertanity(MLE):
             self.chainlen = chainlen
         super().__init__(mock, el_init, Mdm, globalmin)
 
-    def filter_and_write(self, Mdm, write=True, parallel = 6, datafile='../../Output/El_rate_prediction.pkl'):
+    def filter_and_write(self, Mdm, write=True, parallel = 8, datafile='../../Output/El_rate_prediction.pkl'):
         Mdm = np.around(Mdm, 2)
         λsg0d = pickle.load(open(datafile, 'rb'))
         λsg0s = λsg0d['massmodel'][self.gal].copy()
         chain_keys = list(λsg0s.keys())
         for ci in tqdm(range(self.chainlen)):
             if not ci in chain_keys:
+                write = True
                 λsg0s[ci] = {}
                 if parallel:
                     parallel_λsg0s = self.parallel_compute(Mdm, ci, parallel) 
@@ -195,13 +206,15 @@ class MassModelUncertanity(MLE):
                     for mdm in Mdm:
                         λsg0s[ci][mdm] = self.compute_λsg0s(mdm, ci)
             else:
+                write = False
                 mdm_keys = np.array(list(λsg0s[ci].keys()))
                 for mdm in Mdm:
                     if np.min(np.abs(mdm_keys - mdm)) > 0.01:
+                        write = True
                         λsg0s[ci][mdm] = self.compute_λsg0s(mdm, ci)
-        if write:
-            λsg0d['massmodel'][self.gal] = λsg0s
-            pickle.dump(λsg0d, open(datafile, 'wb'))
+            if write:
+                λsg0d['massmodel'][self.gal] = λsg0s
+                pickle.dump(λsg0d, open(datafile, 'wb'))
         return λsg0s
     
     def parallel_func(self, mdm):
@@ -210,7 +223,9 @@ class MassModelUncertanity(MLE):
     def parallel_compute(self, Mdm, chain_idx, num_cores):
         self.chain_idx_here = chain_idx
         with Pool(processes=num_cores) as pool:
-            results = list(pool.imap(self.parallel_func, Mdm))
+            results = []
+            for result in pool.imap(self.parallel_func, Mdm):
+                results.append(result)
         res_dict = {Mdm[i]: results[i] for i in range(len(Mdm))}
         return res_dict
     
@@ -220,7 +235,7 @@ class MassModelUncertanity(MLE):
         vesc = self.mwD['vescs'][chain_idx]
         vcirc = self.mwD['vcircs'][chain_idx]
         if self.fixed_rhosun:
-            rhosun = p50(self.mwD['rhosuns'])
+            rhosun = self.el.ρ0
         else:
             rhosun = self.mwD['rhosuns'][chain_idx]
         el_ = El(self.el.material, vE=vE, vdfE=vdfE, vesc=vesc, vcirc=vcirc, rhosun=rhosun)
@@ -261,111 +276,117 @@ class MassModelUncertanity(MLE):
 
 
 
-# class SampleUncertanity(MLE):
-#     def __init__(self, mock, nr_init, Mdm=np.linspace(1, 10, 20), percentiles=np.arange(5, 96, 2), run_parallel=False, run_globalmin=True, fixed_rhosun=True):
-#         self.gals = mwgals
-#         self.percentiles = np.around(percentiles, 2)
-#         self.fixed_rhosun = fixed_rhosun
-#         self.run_parallel = run_parallel
-#         self.vE = mwld['MW']['vE']
-#         self.vdf_dict  = self.vdf_info()
-#         super().__init__(mock, nr_init, Mdm, run_globalmin)
+class SampleUncertanity(MLE):
+    def __init__(self, mock, el_init, Mdm=np.linspace(1, 10, 20), percentiles=np.arange(5, 96, 2), run_parallel=True, run_globalmin=True, fixed_rhosun=True):
+        self.gals = mwgals
+        self.percentiles = np.around(percentiles, 2)
+        self.fixed_rhosun = fixed_rhosun
+        self.run_parallel = run_parallel
+        self.vE = mwld['MW']['vE']
+        self.vdf_dict  = self.vdf_info()
+        super().__init__(mock, el_init, Mdm, run_globalmin)
 
-#     def vdf_info(self):
-#         Vdfs, Vescs, Vcircs, Rhosuns = [], [], [], []
-#         for gal in mwgals:
-#             Vdfs.append(mwld[gal]['vdfs'])
-#             Vescs.append(mwld[gal]['vescs'])
-#             Vcircs.append(mwld[gal]['vcircs'])
-#             Rhosuns.append(mwld[gal]['rhosuns'])
-#         Vdfs = np.vstack(Vdfs).T
-#         Vescs = np.concatenate(Vescs)
-#         Vcircs = np.concatenate(Vcircs)
-#         Rhosuns = np.concatenate(Rhosuns)
-#         vdf_dict = {}
-#         for per in self.percentiles:
-#             vdf = np.percentile(Vdfs, per, axis=1)
-#             vesc = np.percentile(Vescs, per)
-#             vcirc = np.percentile(Vcircs, per)
-#             rhosun = np.percentile(Rhosuns, per)
-#             vdfE = get_vdf_ert(vE=mwd['vE'], v=mwd['v'], vdf=vdf, vesc=vesc, vcirc=vcirc)
-#             vdf_dict[per] = {'vdf': vdf, 'vdfE': vdfE, 'vesc':vesc, 'vcirc':vcirc, 'rhosun':rhosun}
-#         return vdf_dict
+    def vdf_info(self):
+        Vdfs, Vescs, Vcircs, Rhosuns = [], [], [], []
+        for gal in mwgals:
+            Vdfs.append(mwld[gal]['vdfs'])
+            Vescs.append(mwld[gal]['vescs'])
+            Vcircs.append(mwld[gal]['vcircs'])
+            Rhosuns.append(mwld[gal]['rhosuns'])
+        Vdfs = np.vstack(Vdfs).T
+        Vescs = np.concatenate(Vescs)
+        Vcircs = np.concatenate(Vcircs)
+        Rhosuns = np.concatenate(Rhosuns)
+        vdf_dict = {}
+        for per in self.percentiles:
+            vdf = np.percentile(Vdfs, per, axis=1)
+            vesc = np.percentile(Vescs, per)
+            vcirc = np.percentile(Vcircs, per)
+            rhosun = np.percentile(Rhosuns, per)
+            vdfE = get_vdf_ert(vE=mwd['vE'], v=mwd['v'], vdf=vdf, vesc=vesc, vcirc=vcirc)
+            vdf_dict[per] = {'vdf': vdf, 'vdfE': vdfE, 'vesc':vesc, 'vcirc':vcirc, 'rhosun':rhosun}
+        return vdf_dict
 
-#     def filter_and_write(self, Mdm, write=True, datafile='../../Output/rate_prediction.pkl'):
-#         Mdm = np.around(Mdm, 2)
-#         λsg0d = pickle.load(open(datafile, 'rb'))
-#         λsg0s = λsg0d['sample'].copy()
-#         percentiles = list(λsg0s.keys())
-#         for per in tqdm(self.percentiles):
-#             if not per in percentiles:
-#                 λsg0s[per] = {}
-#                 if self.run_parallel:
-#                     λsg0s[per] = self.parallel_compute(Mdm, per)
-#                 else:
-#                     for mdm in Mdm:
-#                         λsg0s[per][mdm] = self.compute_λsg0s(mdm, per)
-#             else:
-#                 mdm_keys = np.array(list(λsg0s[per].keys()))
-#                 for mdm in Mdm:
-#                     if np.min(np.abs(mdm_keys - mdm)) > 0.01:
-#                         λsg0s[per][mdm] = self.compute_λsg0s(mdm, per)               
-#         if write:
-#             λsg0d['sample'] = λsg0s
-#             pickle.dump(λsg0d, open(datafile, 'wb'))
-#         return λsg0s
+    def filter_and_write(self, Mdm, write=True, datafile='../../Output/rate_prediction.pkl'):
+        Mdm = np.around(Mdm, 2)
+        λsg0d = pickle.load(open(datafile, 'rb'))
+        λsg0s = λsg0d['sample'].copy()
+        percentiles = list(λsg0s.keys())
+        for per in tqdm(self.percentiles):
+            print (per)
+            if not per in percentiles:
+                print ('No per')
+                write = True
+                λsg0s[per] = {}
+                if self.run_parallel:
+                    λsg0s[per] = self.parallel_compute(Mdm, per)
+                else:
+                    for mdm in Mdm:
+                        λsg0s[per][mdm] = self.compute_λsg0s(mdm, per)
+            else:
+                write = False
+                mdm_keys = np.array(list(λsg0s[per].keys()))
+                for mdm in Mdm:
+                    if np.min(np.abs(mdm_keys - mdm)) > 0.01:
+                        print ('no mdm')
+                        write = True
+                        λsg0s[per][mdm] = self.compute_λsg0s(mdm, per)               
+            if write:
+                λsg0d['sample'] = λsg0s
+                pickle.dump(λsg0d, open(datafile, 'wb'))
+        return λsg0s
     
-#     def parallel_func(self, mdm):
-#         return self.compute_λsg0s(mdm, self.percentile_here)
+    def parallel_func(self, mdm):
+        return self.compute_λsg0s(mdm, self.percentile_here)
 
-#     def parallel_compute(self, Mdm, percentile):
-#         self.percentile_here = percentile
-#         num_cores = 6 #cpu_count()
-#         with Pool(processes=num_cores) as pool:
-#             results = list(pool.imap(self.parallel_func, Mdm))
-#         res_dict = {Mdm[i]: results[i] for i in range(len(Mdm))}
-#         return res_dict
+    def parallel_compute(self, Mdm, percentile):
+        self.percentile_here = percentile
+        num_cores = 6 #cpu_count()
+        with Pool(processes=num_cores) as pool:
+            results = list(pool.imap(self.parallel_func, Mdm))
+        res_dict = {Mdm[i]: results[i] for i in range(len(Mdm))}
+        return res_dict
         
-#     def get_nr(self, percentile):
-#         vdfE = self.vdf_dict[percentile]['vdfE']
-#         vesc = self.vdf_dict[percentile]['vesc']
-#         vcirc = self.vdf_dict[percentile]['vcirc']
-#         if self.fixed_rhosun:
-#             rhosun = p50(mwd['rhosuns'])
-#         else:
-#             rhosun = self.vdf_dict[percentile]['rhosun']
-#         return Nr(self.nr.element, vE=self.vE, vdfE=vdfE, vesc=vesc, vcirc=vcirc, rhosun=rhosun, Ethr=self.nr.Ethr, Eroi=self.nr.Eroi, ω=self.nr.ω)
+    def get_el(self, percentile):
+        vdfE = self.vdf_dict[percentile]['vdfE']
+        vesc = self.vdf_dict[percentile]['vesc']
+        vcirc = self.vdf_dict[percentile]['vcirc']
+        if self.fixed_rhosun:
+            rhosun = self.el.ρ0 
+        else:
+            rhosun = self.vdf_dict[percentile]['rhosun']
+        return El(self.el.material, vE=self.vE, vdfE=vdfE, vesc=vesc, vcirc=vcirc, rhosun=rhosun)
     
-#     def compute_λsg0s(self, mdm, percentile):
-#         nr_ = self.get_nr(percentile=percentile)
-#         binT = nr_.binTot(mdm, 1e-46, 0., self.mock['bin_edges'])
-#         return binT['Neachbin']
+    def compute_λsg0s(self, mdm, percentile):
+        el_ = self.get_el(percentile=percentile)
+        binT = el_.binTot(mdm, 1e-40, 0.)
+        return binT['Neachbin']
     
-#     def λsg0(self, mdm, percentile):
-#         mdm_keys = np.array(list(self.λsg0s[percentile].keys()))
-#         mdm_idx = np.argmin(np.abs(mdm_keys - mdm))
-#         return self.λsg0s[percentile][mdm_keys[mdm_idx]]
+    def λsg0(self, mdm, percentile):
+        mdm_keys = np.array(list(self.λsg0s[percentile].keys()))
+        mdm_idx = np.argmin(np.abs(mdm_keys - mdm))
+        return self.λsg0s[percentile][mdm_keys[mdm_idx]]
     
-#     def λsg(self, mdm, sdm, percentile):
-#         return self.λsg0(mdm, percentile)*sdm/1e-46
+    def λsg(self, mdm, sdm, percentile):
+        return self.λsg0(mdm, percentile)*sdm/1e-40
     
-#     def nlL(self, mdm, sdm, bl, percentile):
-#         λ = self.λsg(mdm, sdm, percentile) + self.exp*self.ΔE*bl
-#         lL = np.sum(self.nobs*np.log(λ)) - np.sum(λ)
-#         nlL = -lL
-#         nlL = 1e32 if np.isnan(nlL) else nlL
-#         return nlL
+    def nlL(self, mdm, sdm, bl, percentile):
+        λ = self.λsg(mdm, sdm, percentile) + self.mock['exposure']*self.mock['binwidth']*bl 
+        lL = np.sum(self.nobs*np.log(λ)) - np.sum(λ)
+        nlL = -lL
+        nlL = 1e32 if np.isnan(nlL) else nlL
+        return nlL
     
-#     def lsdm_func(self, lsdm, mdm):
-#         if lsdm > -30:
-#             return 1e32
-#         sdm = math.pow(10, lsdm)
-#         nlls = []
-#         for percentile in self.percentiles:
-#             blm = fsolve(self.bl_func, [0.001], args=(mdm, sdm, percentile))[0]
-#             nlls.append(self.nlL(mdm, sdm, blm, percentile))
-#         return np.min(nlls)
+    def lsdm_func(self, lsdm, mdm):
+        if lsdm > -30:
+            return 1e32
+        sdm = math.pow(10, lsdm)
+        nlls = []
+        for percentile in self.percentiles:
+            blm = fsolve(self.bl_func, [0.001], args=(mdm, sdm, percentile))[0]
+            nlls.append(self.nlL(mdm, sdm, blm, percentile))
+        return np.min(nlls)
     
-#     def bl_func(self, bl, mdm, sdm, percentile):
-#         λ = self.λsg(mdm, sdm, percentile) + self.exp*bl*self.ΔE
-#         return np.mean(self.nobs/λ) - 1.0
+    def bl_func(self, bl, mdm, sdm, percentile):
+        λ = self.λsg(mdm, sdm, percentile) + self.mock['exposure']*self.mock['binwidth']*bl 
+        return np.mean(self.nobs/λ) - 1.0
