@@ -87,7 +87,7 @@ class MLE:
         with Pool(processes=os.cpu_count()) as pool:
             for result in pool.imap(self.limit_fn, Mdm):
                 if 0 in result:
-                    continue 
+                    continue
                 else:
                     Mdm_lim.append(result[0])
                     Sdm_upp.append(result[1])
@@ -313,9 +313,7 @@ class SampleUncertanity(MLE):
         λsg0s = λsg0d['sample'].copy()
         percentiles = list(λsg0s.keys())
         for per in tqdm(self.percentiles):
-            print (per)
             if not per in percentiles:
-                print ('No per')
                 write = True
                 λsg0s[per] = {}
                 if self.run_parallel:
@@ -328,7 +326,6 @@ class SampleUncertanity(MLE):
                 mdm_keys = np.array(list(λsg0s[per].keys()))
                 for mdm in Mdm:
                     if np.min(np.abs(mdm_keys - mdm)) > 0.01:
-                        print ('no mdm')
                         write = True
                         λsg0s[per][mdm] = self.compute_λsg0s(mdm, per)               
             if write:

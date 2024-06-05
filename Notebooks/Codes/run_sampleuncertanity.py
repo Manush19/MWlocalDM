@@ -15,4 +15,4 @@ el_init = El('Si', vE=mwd['vE'], vdfE=mwd['vdfE_50'], vesc=p50(mwd['vescs']), vc
 mdm0, sdm0, bl0 = 5., 1e-38, 1.
 mock = el_init.mocksample(mdm0, sdm0, bl0, 3.8, exposure=1, seed=5222)
 
-samp = Samp(mock, el_init=el_init, Mdm=np.linspace(2,6,100))
+samp = Samp(mock, el_init=el_init, Mdm=np.linspace(2,6,30), percentiles=np.arange(5,96,1))
